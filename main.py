@@ -4,6 +4,7 @@ import yt_dlp
 
 app = Flask(__name__)
 DOWNLOAD_DIR = "/tmp/ytdl"
+COOKIES_PATH = "/tmp/ytdl/cookies.txt"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Track job progress in memory
@@ -213,7 +214,46 @@ HTML = r"""<!DOCTYPE html>
   .log .err  { color: var(--red); }
   .log .info { color: var(--yellow); }
 
-  /* Download card */
+  /* Cookies card */
+  .cookie-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: .75rem;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+  .cookie-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--faint);
+    flex-shrink: 0;
+  }
+  .cookie-dot.active { background: var(--green); }
+  .upload-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: transparent;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: .78rem;
+    padding: 9px 18px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .upload-label:hover { border-color: var(--border-hover); color: #aaa; }
+  #cookie-file { display: none; }
+  .cookie-hint {
+    font-size: .68rem;
+    color: #333;
+    margin-top: 10px;
+    line-height: 1.6;
+  }
+  .cookie-hint a { color: #555; }
+
   #download-card { display: none; }
   #download-card.visible { display: block; }
   .dl-file {
@@ -295,6 +335,24 @@ HTML = r"""<!DOCTYPE html>
     <div id="file-list"></div>
   </div>
 
+  <div class="card">
+    <label>YouTube cookies</label>
+    <div class="cookie-status">
+      <div class="cookie-dot" id="cookie-dot"></div>
+      <span id="cookie-label">No cookies uploaded</span>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
+      <label class="upload-label" for="cookie-file">Upload cookies.txt</label>
+      <input type="file" id="cookie-file" accept=".txt">
+      <button class="btn ghost" id="delete-cookies" style="display:none" onclick="deleteCookies()">Remove</button>
+    </div>
+    <p class="cookie-hint">
+      YouTube blocks server IPs without a valid session. Export your cookies using the
+      <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank">Get cookies.txt Locally</a>
+      Chrome extension while logged into YouTube, then upload the file here.
+    </p>
+  </div>
+
 </div>
 
 <script>
@@ -370,7 +428,32 @@ HTML = r"""<!DOCTYPE html>
     }, 800);
   }
 
-  function showFiles(files, job_id) {
+  async function checkCookies() {
+    const res = await fetch('/cookies-status');
+    const { has_cookies } = await res.json();
+    document.getElementById('cookie-dot').classList.toggle('active', has_cookies);
+    document.getElementById('cookie-label').textContent = has_cookies ? 'cookies.txt loaded' : 'No cookies uploaded';
+    document.getElementById('delete-cookies').style.display = has_cookies ? 'inline-flex' : 'none';
+  }
+
+  document.getElementById('cookie-file').addEventListener('change', async function() {
+    if (!this.files[0]) return;
+    const fd = new FormData();
+    fd.append('cookies', this.files[0]);
+    const res = await fetch('/upload-cookies', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.ok) checkCookies();
+    else alert('Upload failed: ' + data.error);
+    this.value = '';
+  });
+
+  async function deleteCookies() {
+    await fetch('/delete-cookies', { method: 'POST' });
+    checkCookies();
+  }
+
+  checkCookies();
+
     if (!files || !files.length) return;
     const card = document.getElementById('download-card');
     const list = document.getElementById('file-list');
@@ -392,6 +475,24 @@ HTML = r"""<!DOCTYPE html>
 @app.route("/")
 def index():
     return HTML
+
+@app.route("/upload-cookies", methods=["POST"])
+def upload_cookies():
+    f = request.files.get("cookies")
+    if not f:
+        return jsonify({"ok": False, "error": "No file received"}), 400
+    f.save(COOKIES_PATH)
+    return jsonify({"ok": True})
+
+@app.route("/cookies-status")
+def cookies_status():
+    return jsonify({"has_cookies": os.path.exists(COOKIES_PATH)})
+
+@app.route("/delete-cookies", methods=["POST"])
+def delete_cookies():
+    if os.path.exists(COOKIES_PATH):
+        os.remove(COOKIES_PATH)
+    return jsonify({"ok": True})
 
 @app.route("/download", methods=["POST"])
 def download():
@@ -444,6 +545,10 @@ def download():
                 "outtmpl": f"{job_dir}/%(title)s.%(ext)s",
                 "progress_hooks": [progress_hook],
             }
+
+        if os.path.exists(COOKIES_PATH):
+            opts["cookiefile"] = COOKIES_PATH
+            add_log("Using cookies file for authentication.", "info")
 
         add_log(f"Starting {len(urls)} URL(s) in [{mode}] mode…", "info")
         try:
